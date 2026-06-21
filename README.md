@@ -360,7 +360,7 @@ Response:
 
 ## Performance Benchmarks
 
-Tested on AWS ECS Fargate (0.5 vCPU, 1GB RAM):
+Tested on Docker (0.5 vCPU, 1GB RAM):
 
 | Operation            | Time   | Memory Used |
 | -------------------- | ------ | ----------- |
@@ -375,29 +375,6 @@ Tested on AWS ECS Fargate (0.5 vCPU, 1GB RAM):
 
 ```bash
 docker-compose up --build
-```
-
-### AWS ECS Fargate
-
-```bash
-# Build and push to ECR
-aws ecr get-login-password --region us-east-1 | \
-  docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com
-
-docker build -t video-editor ./backend
-docker tag video-editor:latest <account-id>.dkr.ecr.us-east-1.amazonaws.com/video-editor:latest
-docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/video-editor:latest
-
-# Create ECS task and service with resource constraints:
-# CPU: 512 (0.5 vCPU)
-# Memory: 1024 MB
-```
-
-### Kubernetes (Future)
-
-```bash
-kubectl apply -f k8s/deployment.yaml
-kubectl autoscale deployment backend --min=1 --max=100 --cpu-percent=70
 ```
 
 ## Monitoring & Debugging

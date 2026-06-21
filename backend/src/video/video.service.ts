@@ -9,128 +9,146 @@ import { promisify } from "util";
 import * as fs from "fs";
 import * as path from "path";
 import { v4 as uuidv4 } from "uuid";
+import { VIDEO_CONSTANTS, HTTP_STATUS_MESSAGES } from "../common/constants";
+import { MergeClipsDto, ClipDto } from "../common/dtos";
 
 const execAsync = promisify(exec);
 
-interface Clip {
-  start: number;
-  end: number;
-}
-
-interface MergeRequest {
-  clips: Clip[];
-  transition?: "fade" | "cut" | "slide";
-}
-
+/**
+ * Service for handling video download, processing, and merging operations
+ */
 @Injectable()
 export class VideoService {
-  private readonly uploadsDir = "/tmp/video-editor";
-  private readonly maxVideoSize = 500 * 1024 * 1024; // 500MB
-  private readonly maxDuration = 1800; // 30 mins in seconds
+  private readonly logger = new Logger(VideoService.name);
+  private readonly uploadsDir = VIDEO_CONSTANTS.UPLOADS_DIR;
+  private readonly maxVideoSize = VIDEO_CONSTANTS.MAX_VIDEO_SIZE;
+  private readonly maxDuration = VIDEO_CONSTANTS.MAX_DURATION_SECONDS;
 
   constructor() {
     this.ensureUploadsDir();
   }
 
-  private ensureUploadsDir() {
+  /**
+   * Ensures the uploads directory exists, creating it if necessary
+   */
+  private ensureUploadsDir(): void {
     if (!fs.existsSync(this.uploadsDir)) {
       fs.mkdirSync(this.uploadsDir, { recursive: true });
+      this.logger.log(`Created uploads directory: ${this.uploadsDir}`);
     }
   }
 
+  /**
+   * Downloads a YouTube video using yt-dlp
+   *
+   * @param url - The YouTube URL to download
+   * @returns Object containing video ID, duration, and file path
+   * @throws BadRequestException if URL is invalid or video duration exceeds limit
+   * @throws InternalServerErrorException if download fails
+   */
   async downloadYouTubeVideo(
     url: string,
   ): Promise<{ id: string; duration: number; path: string }> {
-    // Validate URL
     if (!this.isValidYouTubeUrl(url)) {
-      throw new BadRequestException("Invalid YouTube URL");
+      throw new BadRequestException(HTTP_STATUS_MESSAGES.INVALID_URL);
     }
+
     const videoId = uuidv4();
     const outputPath = path.join(this.uploadsDir, `${videoId}.mp4`);
 
     try {
-      // Using yt-dlp to download YouTube video
-      // --no-playlist ensures we only download the video, not the entire playlist
-      const command = `yt-dlp --no-playlist -f 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]' -o "${outputPath}" "${url}"`;
+      this.logger.log(`Starting video download for URL: ${url}`);
 
-      const { stdout, stderr } = await execAsync(command, { timeout: 300000 });
+      const command = `yt-dlp --no-playlist -f 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]' -o "${outputPath}" "${url}"`;
+      const { stdout, stderr } = await execAsync(command, {
+        timeout: VIDEO_CONSTANTS.DOWNLOAD_TIMEOUT,
+      });
 
       if (!fs.existsSync(outputPath)) {
-        throw new Error(
-          `Video download failed - file not created. stdout: ${stdout}, stderr: ${stderr}`,
-        );
+        throw new Error("Video file not created after download");
       }
 
-      // Get video duration
       const duration = await this.getVideoDuration(outputPath);
 
       if (duration > this.maxDuration) {
         fs.unlinkSync(outputPath);
+        const maxMinutes = this.maxDuration / 60;
         throw new BadRequestException(
-          `Video duration exceeds ${this.maxDuration / 60} minutes limit`,
+          HTTP_STATUS_MESSAGES.VIDEO_DURATION_EXCEEDED(maxMinutes),
         );
       }
 
+      this.logger.log(
+        `Video downloaded successfully: ${videoId} (${duration}s)`,
+      );
       return { id: videoId, duration, path: outputPath };
     } catch (error) {
-      // Cleanup on error
       if (fs.existsSync(outputPath)) {
         fs.unlinkSync(outputPath);
       }
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error";
+      this.logger.error(`Video download failed: ${errorMessage}`);
       throw new InternalServerErrorException(
-        `Failed to download video: ${errorMessage}`,
+        HTTP_STATUS_MESSAGES.DOWNLOAD_FAILED(errorMessage),
       );
     }
   }
 
+  /**
+   * Gets the duration of a video file using ffprobe
+   *
+   * @param videoPath - Path to the video file
+   * @returns Duration in seconds (rounded up)
+   * @throws InternalServerErrorException if ffprobe fails
+   */
   async getVideoDuration(videoPath: string): Promise<number> {
     try {
       const command = `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1:noprint_wrappers=1 "${videoPath}"`;
       const { stdout } = await execAsync(command);
       return Math.ceil(parseFloat(stdout.trim()));
     } catch (error) {
-      throw new InternalServerErrorException("Failed to get video duration");
+      this.logger.error("Failed to get video duration");
+      throw new InternalServerErrorException(
+        HTTP_STATUS_MESSAGES.DURATION_FETCH_FAILED,
+      );
     }
   }
 
+  /**
+   * Merges multiple video clips into a single file
+   *
+   * @param videoPath - Path to the source video
+   * @param mergeData - Clips to merge and transition settings
+   * @returns Object containing output video ID and file path
+   * @throws BadRequestException if clips data is invalid
+   * @throws InternalServerErrorException if merge operation fails
+   */
   async mergeClips(
     videoPath: string,
-    mergeData: MergeRequest,
+    mergeData: MergeClipsDto,
   ): Promise<{ id: string; path: string }> {
-    // Validate clips
-    if (!mergeData.clips || mergeData.clips.length === 0) {
-      throw new BadRequestException("At least one clip is required");
-    }
+    this.validateClips(mergeData.clips);
 
-    // Sort clips by start time
-    const sortedClips = mergeData.clips.sort((a, b) => a.start - b.start);
-
-    // Validate clip ranges
-    for (const clip of sortedClips) {
-      if (clip.start < 0 || clip.end <= clip.start) {
-        throw new BadRequestException("Invalid clip range");
-      }
-    }
+    const sortedClips = this.sortClips(mergeData.clips);
+    this.validateClipRanges(sortedClips);
 
     const outputId = uuidv4();
     const outputPath = path.join(this.uploadsDir, `${outputId}.mp4`);
     const concatFile = path.join(this.uploadsDir, `${outputId}_concat.txt`);
+    const clipPaths: string[] = [];
 
     try {
+      this.logger.log(`Starting merge operation for video: ${videoPath}`);
+
       // Extract clips
-      const clipPaths: string[] = [];
       for (let i = 0; i < sortedClips.length; i++) {
-        const clip = sortedClips[i];
-        const clipPath = path.join(
-          this.uploadsDir,
-          `${outputId}_clip_${i}.mp4`,
+        const clipPath = await this.extractClip(
+          videoPath,
+          sortedClips[i],
+          outputId,
+          i,
         );
-        const ffmpegCmd = `ffmpeg -i "${videoPath}" -ss ${clip.start} -to ${clip.end} -c:v copy -c:a copy "${clipPath}" -y 2>&1`;
-
-        await execAsync(ffmpegCmd, { timeout: 60000 });
-
         clipPaths.push(clipPath);
       }
 
@@ -138,8 +156,9 @@ export class VideoService {
       const concatContent = clipPaths.map((p) => `file '${p}'`).join("\n");
       fs.writeFileSync(concatFile, concatContent);
 
-      // Apply transitions and merge
-      const transition = mergeData.transition || "cut";
+      // Merge clips
+      const transition =
+        mergeData.transition || VIDEO_CONSTANTS.DEFAULT_TRANSITION;
       const mergeCmd = this.buildMergeCommand(
         concatFile,
         outputPath,
@@ -147,33 +166,119 @@ export class VideoService {
         transition,
       );
 
-      await execAsync(mergeCmd, { timeout: 600000 }); // 10 min timeout for transitions
+      await execAsync(mergeCmd, { timeout: VIDEO_CONSTANTS.MERGE_TIMEOUT });
 
-      // Cleanup clip files and concat file
-      clipPaths.forEach((p) => {
-        if (fs.existsSync(p)) {
-          fs.unlinkSync(p);
-        }
-      });
-      if (fs.existsSync(concatFile)) {
-        fs.unlinkSync(concatFile);
-      }
+      this.cleanupIntermediateFiles(clipPaths, concatFile);
 
+      this.logger.log(`Merge completed successfully: ${outputId}`);
       return { id: outputId, path: outputPath };
     } catch (error) {
-      console.error(`[MERGE_ERROR] Error during merge: ${error}`);
-      // Cleanup on error
-      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
-      if (fs.existsSync(concatFile)) fs.unlinkSync(concatFile);
+      this.cleanupIntermediateFiles(clipPaths, concatFile);
+      if (fs.existsSync(outputPath)) {
+        fs.unlinkSync(outputPath);
+      }
 
       const errorMessage =
         error instanceof Error ? error.message : "Unknown error";
+      this.logger.error(`Merge operation failed: ${errorMessage}`);
       throw new InternalServerErrorException(
-        `Failed to merge clips: ${errorMessage}`,
+        HTTP_STATUS_MESSAGES.MERGE_FAILED(errorMessage),
       );
     }
   }
 
+  /**
+   * Validates that clips array is not empty
+   *
+   * @param clips - Array of clips to validate
+   * @throws BadRequestException if clips array is empty
+   */
+  private validateClips(clips: ClipDto[]): void {
+    if (!clips || clips.length === 0) {
+      throw new BadRequestException(HTTP_STATUS_MESSAGES.CLIPS_REQUIRED);
+    }
+  }
+
+  /**
+   * Sorts clips by start time
+   *
+   * @param clips - Array of clips to sort
+   * @returns Sorted array of clips
+   */
+  private sortClips(clips: ClipDto[]): ClipDto[] {
+    return [...clips].sort((a, b) => a.start - b.start);
+  }
+
+  /**
+   * Validates that all clips have valid time ranges
+   *
+   * @param clips - Array of clips to validate
+   * @throws BadRequestException if any clip has invalid range
+   */
+  private validateClipRanges(clips: ClipDto[]): void {
+    for (const clip of clips) {
+      if (clip.start < 0 || clip.end <= clip.start) {
+        throw new BadRequestException(HTTP_STATUS_MESSAGES.INVALID_CLIP_RANGE);
+      }
+    }
+  }
+
+  /**
+   * Extracts a single clip from the source video
+   *
+   * @param videoPath - Path to source video
+   * @param clip - Clip definition
+   * @param outputId - Output operation ID
+   * @param index - Clip index
+   * @returns Path to extracted clip
+   */
+  private async extractClip(
+    videoPath: string,
+    clip: ClipDto,
+    outputId: string,
+    index: number,
+  ): Promise<string> {
+    const clipPath = path.join(
+      this.uploadsDir,
+      `${outputId}_clip_${index}.mp4`,
+    );
+    const ffmpegCmd = `ffmpeg -i "${videoPath}" -ss ${clip.start} -to ${clip.end} -c:v copy -c:a copy "${clipPath}" -y 2>&1`;
+
+    await execAsync(ffmpegCmd, {
+      timeout: VIDEO_CONSTANTS.CLIP_EXTRACTION_TIMEOUT,
+    });
+    return clipPath;
+  }
+
+  /**
+   * Cleans up intermediate files created during merge operation
+   *
+   * @param clipPaths - Array of clip file paths to delete
+   * @param concatFile - Concat file path to delete
+   */
+  private cleanupIntermediateFiles(
+    clipPaths: string[],
+    concatFile: string,
+  ): void {
+    clipPaths.forEach((p) => {
+      if (fs.existsSync(p)) {
+        fs.unlinkSync(p);
+      }
+    });
+    if (fs.existsSync(concatFile)) {
+      fs.unlinkSync(concatFile);
+    }
+  }
+
+  /**
+   * Builds the ffmpeg command for merging clips
+   *
+   * @param concatFile - Path to concat file
+   * @param outputPath - Output video path
+   * @param clipPaths - Array of clip paths
+   * @param transition - Transition type to apply
+   * @returns FFmpeg command string
+   */
   private buildMergeCommand(
     concatFile: string,
     outputPath: string,
@@ -185,32 +290,56 @@ export class VideoService {
       return `ffmpeg -f concat -safe 0 -i "${concatFile}" -c copy "${outputPath}" -y 2>&1`;
     }
 
-    // For fade transition, we'd need to use complex filter which uses more resources
-    // Simplified version: just use copy for now, real implementation would add filters
+    // For fade/slide transitions, would need complex filters (not fully implemented)
+    // Currently falls back to cut for performance
     return `ffmpeg -f concat -safe 0 -i "${concatFile}" -c copy "${outputPath}" -y 2>&1`;
   }
 
+  /**
+   * Retrieves the file path for a video
+   *
+   * @param videoId - Video identifier
+   * @returns Full path to video file
+   * @throws BadRequestException if video file doesn't exist
+   */
   getVideoFile(videoId: string): string {
     const videoPath = path.join(this.uploadsDir, `${videoId}.mp4`);
     if (!fs.existsSync(videoPath)) {
-      throw new BadRequestException("Video not found");
+      throw new BadRequestException(HTTP_STATUS_MESSAGES.VIDEO_REQUIRED);
     }
     return videoPath;
   }
 
+  /**
+   * Deletes a video file from storage
+   *
+   * @param videoId - Video identifier
+   */
   cleanupVideo(videoId: string): void {
     const videoPath = path.join(this.uploadsDir, `${videoId}.mp4`);
     if (fs.existsSync(videoPath)) {
       fs.unlinkSync(videoPath);
+      this.logger.log(`Cleaned up video: ${videoId}`);
     }
   }
 
+  /**
+   * Validates if a URL is a valid YouTube URL
+   *
+   * @param url - URL to validate
+   * @returns True if valid YouTube URL, false otherwise
+   */
   private isValidYouTubeUrl(url: string): boolean {
     const youtubeRegex =
       /^(https?:\/\/)?(www\.)?youtube\.com\/(watch\?v=|embed\/|v\/)[-\w]{11}|youtu\.be\/[-\w]{11}/;
     return youtubeRegex.test(url);
   }
 
+  /**
+   * Gets current system resource usage
+   *
+   * @returns Object containing timestamp and memory usage statistics
+   */
   getResourceUsage(): { timestamp: Date; memoryUsage: NodeJS.MemoryUsage } {
     return {
       timestamp: new Date(),
