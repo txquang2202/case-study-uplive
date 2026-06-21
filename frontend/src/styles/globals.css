@@ -1,3 +1,7 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
 * {
   margin: 0;
   padding: 0;
@@ -11,42 +15,15 @@ body {
     "Cantarell", "Fira Sans", "Droid Sans", "Helvetica Neue", sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-  background-color: #ffffff;
-  color: #333333;
 }
 
-main {
-  max-width: 1200px;
-  margin: 0 auto;
-}
+@layer components {
+  input[type="text"],
+  input[type="number"] {
+    @apply w-full px-4 py-2 bg-gray-700 border border-gray-600 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 transition-colors;
+  }
 
-h1 {
-  font-size: 2.5rem;
-  margin-bottom: 1rem;
-  color: #000;
-}
-
-h2 {
-  font-size: 1.75rem;
-  margin-bottom: 0.75rem;
-  color: #222;
-}
-
-section {
-  margin-bottom: 2rem;
-}
-
-ul {
-  list-style: none;
-  padding-left: 0;
-}
-
-li {
-  margin-bottom: 0.5rem;
-  padding-left: 1.5rem;
-}
-
-p {
-  line-height: 1.6;
-  margin-bottom: 0.5rem;
+  button:disabled {
+    @apply cursor-not-allowed opacity-50;
+  }
 }

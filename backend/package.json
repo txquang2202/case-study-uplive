@@ -36,7 +36,9 @@
     "pg": "^8.11.3",
     "reflect-metadata": "^0.1.13",
     "rxjs": "^7.8.1",
-    "typeorm": "^0.3.19"
+    "typeorm": "^0.3.19",
+    "axios": "^1.6.2",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
     "@nestjs/cli": "^10.3.0",
@@ -49,6 +51,7 @@
     "@types/passport-jwt": "^4.0.0",
     "@types/passport-local": "^1.0.38",
     "@types/supertest": "^6.0.2",
+    "@types/uuid": "^9.0.7",
     "@typescript-eslint/eslint-plugin": "^6.19.0",
     "@typescript-eslint/parser": "^6.19.0",
     "eslint": "^8.56.0",

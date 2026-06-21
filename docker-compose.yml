@@ -1,23 +1,6 @@
 version: "3.8"
 
 services:
-  postgres:
-    image: postgres:15-alpine
-    container_name: case-study-db
-    environment:
-      POSTGRES_USER: devuser
-      POSTGRES_PASSWORD: devpassword
-      POSTGRES_DB: caseStudyDB
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U devuser"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-
   backend:
     build:
       context: ./backend
@@ -26,16 +9,35 @@ services:
     ports:
       - "3001:3001"
     environment:
-      DATABASE_URL: postgresql://devuser:devpassword@postgres:5432/caseStudyDB
       PORT: 3001
-      NODE_ENV: development
+      NODE_ENV: production
     volumes:
-      - ./backend:/app
-      - /app/node_modules
-    depends_on:
-      postgres:
-        condition: service_healthy
-    command: npm run start:dev
+      - ./backend/dist:/app/dist:ro
+      - /tmp/video-editor:/tmp/video-editor
+    # Resource constraints for AWS ECS Fargate simulation
+    # 0.5 vCPU = 512 CPU units, 1GB RAM
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 1G
+        reservations:
+          cpus: "0.25"
+          memory: 512M
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://localhost:3001/api",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
   frontend:
     build:
@@ -45,14 +47,31 @@ services:
     ports:
       - "3000:3000"
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:3001
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
+      NEXT_PUBLIC_API_URL: http://backend:3001
     depends_on:
-      - backend
-    command: npm run dev
+      backend:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512M
+        reservations:
+          cpus: "0.25"
+          memory: 256M
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--quiet",
+          "--tries=1",
+          "--spider",
+          "http://localhost:3000",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
 
-volumes:
-  postgres-data:
+volumes: {}
